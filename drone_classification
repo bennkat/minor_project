@@ -1,0 +1,317 @@
+// Classification with 8,000 points
+// creates variable of bands we're going to use for classification
+var bands = ['b3','b2','b1'];
+
+
+
+//First draw polygons (30 for each class) for training data
+// - then create classes of 8,000 random points for each substrate (pulls 8,000 random
+// points from the polygons)
+//----------------------------------------------------------------------
+// Coral
+//---------------------------------------------------------------------
+
+
+// Below creates 8,000 random points in the Coral feature collection
+
+var LC_points = ee.FeatureCollection.randomPoints(LC, 8000);
+
+
+// below function sets the substrate properties of each point in the Coral feature collection
+
+var LC_points_2 = LC_points.map(function(ft){
+  return ee.Feature(ft).set('Substrate', 0);
+});
+  
+//print(LC_points_2);
+
+
+
+//-------------------------------------------------------------------------------
+ //Sand
+//-------------------------------------------------------------------------------
+
+var Sand_points = ee.FeatureCollection.randomPoints(Sand, 8000);
+
+
+// below function sets the substrate properties of each point in the sand feature collection
+var Sand_points_2 = Sand_points.map(function(ft){
+  return ee.Feature(ft).set('Substrate', 2);
+});
+//print(Sand_points_2);
+
+
+//-----------------------------------------------------------------------------------------
+//Rock 
+//-----------------------------------------------------------------------------------------
+
+var Rock_points = ee.FeatureCollection.randomPoints(Rock, 8000);
+
+
+// below function sets the substrate properties of each point in the Rock feature collection
+var Rock_points_2 = Rock_points.map(function(ft){
+  return ee.Feature(ft).set('Substrate', 1);
+});
+  
+//print(Rock_points_2);
+
+//---------------------------------------------------------------------------------
+//Sunglint
+//---------------------------------------------------------------------------------
+
+
+var glint_points = ee.FeatureCollection.randomPoints(Sunglint, 8000);
+
+
+// below function sets the substrate properties of each point in the sand feature collection
+var Glint_points_2 = glint_points.map(function(ft){
+  return ee.Feature(ft).set('Substrate', 3);
+});
+  //---------------------------------------------------------------------------------
+  
+  
+//Merge each feature collection together of all substrates (w/ substrate properties ):
+
+var random_points = (LC_points_2).merge(Sand_points_2).merge(Glint_points_2).merge(Rock_points_2);
+//print(random_points);
+
+
+//add collumn of random uniforms to the training feature class and split 70/30 for validating and testing 
+
+var withRandom = random_points.randomColumn({ seed: 1 });
+
+
+//reserve some data for testing:
+
+
+var split = 0.7;  // Roughly 70% training, 30% testing.
+var trainingPartitionT = withRandom.filter(ee.Filter.lt('random', split));
+var testingPartition = withRandom.filter(ee.Filter.gte('random', split));
+
+
+//------------------------------------------------------------------
+// displays histogram of # of training points per class in training Partition
+//-----------------------------------------------------------------
+
+
+var histogram =
+    ui.Chart.feature
+        .histogram(
+            {features: trainingPartitionT, property: 'Substrate'})
+        .setOptions({
+          title: 'Number of Pixels per Substrate Class',
+    hAxis: {
+      title: 'Class',
+      ticks: [{v: 0, f: 'LC'},
+              {v: 1, f: 'Rock'},
+              {v: 2, f: 'Sand'},
+              {v: 3, f: 'Sunglint'}]
+    },
+    vAxis: {
+      title: 'Number of Pixels'
+    }
+  });
+  
+  print(histogram);
+  
+//-----------------------------------------------------------------------------------------
+
+
+// function to extract all reflectance data from the trainingPartition points to train classifier:
+
+var trainingImage_Collection = function(image){
+  return image.select(bands).sampleRegions({
+  collection: trainingPartitionT,
+  properties: ['Substrate'],
+  scale: 0.0045
+})};
+
+// map the function over the training images with training points in them to get training data:
+
+var trainingPartition = Training.map(trainingImage_Collection).flatten();
+//print(training);  // returns training class points with substrate properties and band reflectance data
+
+
+//--------------------------------------------------------------------------------------------
+// Train classifier's with training partition to test accuracy/ choose classifier
+//--------------------------------------------------------------------------------------------
+var trainedClassifierCART_WC = ee.Classifier.cart().train({
+  features: trainingPartition, 
+  classProperty: 'Substrate',
+  inputProperties: bands
+});
+
+// Train RF classifier
+var trainedClassifierRF = ee.Classifier.randomForest().train({
+  features: trainingPartition,
+  classProperty: 'Substrate',
+  inputProperties: bands
+});
+
+
+//-----------------------------------------------------------------------------------------
+//TESTS ACCURACY OF EACH CLASSIFIER 
+//------------------------------------------------------------------------------------------
+
+//runs confusion matrix and accuracy test to know how good the classifier is at separating out classes
+// within the training data
+
+ var trainAccuracyRF = trainedClassifierRF.confusionMatrix().accuracy();
+print(trainAccuracyRF); 
+
+var trainAccuracyCART = trainedClassifierCART_WC.confusionMatrix().accuracy();
+print(trainAccuracyCART); 
+
+
+//-----------------------------------------------------------------------------
+// classify the entire image collection with CART classifier and assess accuracy:
+//-----------------------------------------------------------------------------
+
+
+var classifiedCollectionCART_WC = Heron_images.select(bands)
+  .map(function(image) {
+    return image.classify(trainedClassifierCART_WC);
+  });
+
+
+//-----------------------------------------------------------------------------------
+//   ACCURACY ASSESSMENT 
+//sample classification results to the validation areas (30% of training points left for validation)
+//------------------------------------------------------------------------------------
+/*
+// Below function samples classification of the pixel at each validation point:  
+
+var Val_function = function(image){
+  return image.sampleRegions({
+  collection: testingPartition,
+  properties: ['Substrate'],
+  scale: 0.0045
+})};
+
+
+// map the classified collection with the val_function to sample classification results:
+// of validation points:
+
+var Val_data = classifiedCollectionCART_WC.map(Val_function).flatten();
+print(Val_data);
+
+// Create a confusion matrix of results to assess accuracy:
+
+var confusionMatrixCART_WC = Val_data.errorMatrix('Substrate', 'classification');
+
+// Print the error matrix to the console (takes too long to compute in the console, so need to export results as a table to 
+//either google drive or google cloud storage) 
+
+//print('Validation error matrix: ', confusionMatrixCART_WC);
+//Print the overall accuracy to the console
+//print('Validation overall accuracy: ', confusionMatrixCART_WC.accuracy());
+
+// Computes accuracy metrics from the confusion matrix:
+var testAccuracyCART_WC=  confusionMatrixCART_WC.accuracy();
+
+
+
+
+// EXPORTS CART ACCURACY / ERROR MATRIX RESULTS:
+
+//GEE prints confusion matrices so rows represent reference pixels and columns represent classification results 
+//(opposite of the format used for remote sensing publications) 
+
+var exportconfusionMatrixCART_WC = ee.Feature(null, {matrix: confusionMatrixCART_WC.array()}); 
+
+var exporttestAccuracyCART_WC = ee.Feature(null, {matrix: testAccuracyCART_WC}); 
+
+Export.table.toDrive({
+  collection: ee.FeatureCollection(exportconfusionMatrixCART_WC),
+  description: 'confusionMatrixCART_8000',
+  fileFormat: 'CSV'
+});
+
+
+Export.table.toDrive({
+  collection: ee.FeatureCollection(exporttestAccuracyCART_WC),
+  description: 'Accuracy_CART_8000',
+  fileFormat: 'CSV'
+});
+
+
+
+//--------------------------------------------------------------------------------------
+/* Mosaic testCollection to create one image object (to view classification result). Because of the 
+resolution of the images, can't export the classification result as a total mosaic image -
+takes too much memory. But can veiw the classification result and can classifiy and export images individually:
+
+*/
+//--------------------------------------------------------------------------------------
+// this works to display the classification result
+// over the entire image collection when mapped
+
+var mosaic_collection = Heron_images.mosaic(); 
+
+
+// Classify the mosaic (to view classified result):
+var classifiedCollectionCART = mosaic_collection.select(bands).classify(trainedClassifierCART_WC);
+
+
+//Add layer to map - maps the classified image object 
+Map.addLayer(mosaic_collection, '', 'Collection');
+
+// Add viewing parameters to add colors to each substrate classification. Colors need to be in the same order
+// as the substrate classes are listed in the imports (above)
+
+Map.addLayer(classifiedCollectionCART, 
+{min: 0, max: 3, palette: ["green","purple","yellow","white"]},
+'classification');
+*/
+//----------------------------------------------------------------------------------
+// Calculate area percentages per substrate per drone image
+//---------------------------------------------------------------------------------
+
+var fields = ['LC', 'Rock', 'Sand', 'Sunglint'];
+var byArea = classifiedCollectionCART_WC.map(function(image) {
+  return image.select('classification').eq([0, 1, 2, 3]).rename(fields)
+  .multiply(ee.Image.pixelArea())
+  .reduceRegions({
+    collection: Heron_images, 
+    reducer: ee.Reducer.sum()
+    , 
+    scale: 0.0045})
+}).flatten();
+
+Export.table.toDrive({
+  collection: byArea, 
+  description: 'byArea_Heron', 
+  fileFormat: 'CSV'
+});
+
+
+//----------------------------------------------------------------------------------
+/* How to classify a single image  and export it to drive */
+
+//-----------------------------------------------------------------------------------
+
+
+
+var palette = ["green","purple","yellow","white"];
+
+var classified = imagename.select(bands).classify(trainedClassifierCART_WC);
+Map.addLayer(DJI_0015, '', 'DJI_0015');
+Map.centerObject(classified, 11);
+Map.addLayer(classified,
+{min: 0, max: 3, palette: ["green","purple","yellow","white"]},
+'classification');
+
+
+
+
+Export.image.toDrive({
+  image: classified.visualize({min:0 , max: 3, palette: palette}),
+  description: "image name", 
+  region: imagename.geometry(), 
+  scale: 0.0045, 
+  skipEmptyTiles: true,
+  fileFormat: 'GeoTIFF',
+  crs: "EPSG:32756",
+  maxPixels: 1e11
+}); 
+*/
